@@ -741,3 +741,74 @@ tr.current-row td { background: #24304a; }
 .pl-seg-main { flex: 1 1 auto; display: grid; gap: 2px; min-width: 0; }
 .pl-seg-session { color: #9aa3b8; font-size: 11.5px; }
 .pl-seg-open { flex: 0 0 auto; color: #8ab4ff; text-decoration: none; font-size: 12px; white-space: nowrap; }
+
+/* 确认延迟诊断（/latency.html，只读） */
+.lat-main { max-width: 1080px; }
+.lat-open-replay { font-size: 13px; color: #8ab4ff; text-decoration: none; white-space: nowrap; }
+.lat-open-replay:hover { text-decoration: underline; }
+.lat-filters { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.lat-filters select { width: auto; flex: 0 1 240px; }
+.lat-filters label { font-size: 13px; color: #8b93a8; }
+.lat-summary { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.lat-legend { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; font-size: 13px; color: #9aa3b8; margin-bottom: 12px; }
+.lat-legend .lat-lg { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+.lat-lg-pause { background: repeating-linear-gradient(45deg, #3a4052 0 3px, #23262f 3px 6px); border: 1px solid #3a4052; }
+
+.lat-cue { border: 1px solid #2c3040; border-radius: 8px; background: #171a22; padding: 12px 14px; margin-bottom: 14px; }
+.lat-cue-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 14px; }
+.lat-cue-text { color: #e8eaf0; }
+.lat-cue-orig { margin-top: 4px; font-size: 12px; }
+.lat-jump { margin-left: auto; color: #8ab4ff; text-decoration: none; font-size: 12.5px; white-space: nowrap; }
+.lat-jump:hover { text-decoration: underline; }
+
+.lat-round { margin-top: 12px; border-top: 1px dashed #2c3040; padding-top: 10px; }
+.lat-round-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12.5px; }
+.lat-attempt { font-family: "SFMono-Regular", Consolas, monospace; font-size: 11.5px; color: #5d6478; }
+.lat-round-reason { margin-top: 6px; font-size: 12.5px; color: #f0c169; }
+.lat-round-pauses { margin-top: 6px; font-size: 12px; color: #8ab4ff; line-height: 1.7; }
+.lat-round-extras { margin-top: 6px; font-size: 12px; color: #ff9c9c; }
+
+.lat-rows { display: grid; gap: 4px; margin-top: 8px; }
+.lat-row {
+  display: grid;
+  grid-template-columns: 150px 1fr 150px 96px;
+  gap: 10px;
+  align-items: center;
+  padding: 5px 8px;
+  border-radius: 6px;
+  text-decoration: none;
+  color: #c3c9d8;
+  font-size: 12.5px;
+}
+.lat-row:hover { background: #20242f; }
+.lat-pos { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lat-pos .lat-subbed { color: #7c8398; text-decoration: line-through; margin-right: 4px; }
+.lat-pos b { color: #c084fc; font-weight: 600; }
+.lat-track { position: relative; height: 16px; background: #14161c; border: 1px solid #23262f; border-radius: 4px; overflow: hidden; }
+.lat-bar { position: absolute; top: 0; bottom: 0; left: 0; border-radius: 3px 0 0 3px; opacity: 0.85; }
+.lat-bar.confirmed { background: #4caf7d; }
+.lat-bar.late { background: #f0c169; }
+.lat-bar.timeout { background: rgba(255, 118, 118, 0.45); }
+.lat-bar.unconfirmed { background: rgba(93, 100, 120, 0.4); }
+.lat-pause {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: repeating-linear-gradient(45deg, rgba(90, 98, 120, 0.55) 0 3px, rgba(35, 38, 47, 0.55) 3px 6px);
+  z-index: 1;
+}
+.lat-mark { position: absolute; top: 50%; width: 8px; height: 8px; transform: translate(-4px, -50%); z-index: 2; }
+.mk-confirm { border-radius: 50%; }
+.mk-confirm.confirmed { background: #8fe3a5; box-shadow: 0 0 0 2px rgba(143, 227, 165, 0.25); }
+.mk-confirm.late { background: #f0c169; box-shadow: 0 0 0 2px rgba(240, 193, 105, 0.25); }
+.mk-timeout { background: #ff7676; transform: translate(-4px, -50%) rotate(45deg); border-radius: 1px; }
+.lat-wait { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; color: #c3c9d8; white-space: nowrap; }
+.lat-deduct { display: block; font-size: 11px; color: #8ab4ff; }
+.lat-row .chip { text-align: center; }
+.lat-scale { display: flex; justify-content: space-between; font-size: 11px; color: #5d6478; margin: 2px 168px 0 168px; }
+
+@media (max-width: 860px) {
+  .lat-row { grid-template-columns: 96px 1fr; grid-template-rows: auto auto; }
+  .lat-wait, .lat-row .chip { justify-self: start; }
+  .lat-scale { margin: 2px 0 0; }
+}

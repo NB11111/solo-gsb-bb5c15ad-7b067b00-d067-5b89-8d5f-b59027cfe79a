@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>确认延迟诊断 · 舞台口令同步系统</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>⏱️ 确认延迟诊断（只读）</h1>
+    <nav>
+      <a href="replay.html">演出复盘</a>
+      <a href="compare.html">场次对比</a>
+      <a href="archive.html">复盘归档</a>
+      <a href="/">← 返回首页</a>
+    </nav>
+  </header>
+  <main class="lat-main">
+    <!-- 场次选择 -->
+    <section class="card">
+      <h2>选择已结束场次</h2>
+      <div class="muted" style="margin-bottom:12px">
+        诊断为纯只读操作：仅通过复盘只读 GET 接口读取 <code>data</code> 目录事件日志，不连接 WebSocket、不写入任何日志或演出状态。
+        逐口令展示各目标岗位的确认瀑布：按 <code>attemptId</code> 重建每次修订轮次，等待时长已扣除暂停区间；
+        替岗后的确认计入接管岗位，迟到与超时保留标记。点击任意条目跳回复盘对应事件。
+      </div>
+      <div id="sessLoading" class="muted">正在读取已结束场次列表…</div>
+      <div class="row" id="pickerRow" style="display:none">
+        <select id="sessionSelect"></select>
+        <a id="openReplayLink" class="narrow lat-open-replay" href="#" style="display:none">↗ 在复盘中打开本场</a>
+      </div>
+      <div id="sessionMeta" class="archive-meta" style="display:none"></div>
+    </section>
+
+    <!-- 诊断结果 -->
+    <section id="resultCard" class="card" style="display:none">
+      <h2>逐口令确认瀑布</h2>
+      <div class="lat-filters">
+        <label>岗位</label>
+        <select id="positionFilter"></select>
+        <label>结果</label>
+        <select id="resultFilter"></select>
+        <span id="filterHint" class="muted"></span>
+      </div>
+      <div id="summaryChips" class="lat-summary"></div>
+      <div class="lat-legend">
+        <span><i class="lat-lg" style="background:#4caf7d"></i> 已确认</span>
+        <span><i class="lat-lg" style="background:#f0c169"></i> 迟到确认</span>
+        <span><i class="lat-lg" style="background:#ff7676"></i> 超时未确认</span>
+        <span><i class="lat-lg" style="background:#5d6478"></i> 未确认</span>
+        <span><i class="lat-lg lat-lg-pause"></i> 暂停区间（已从等待时长扣除）</span>
+        <span class="muted">条形为等待窗口（墙钟），◆ 为超时时刻，● 为确认时刻；点击条目跳回复盘对应事件。</span>
+      </div>
+      <div id="cueList"></div>
+      <div id="emptyFilter" class="muted" style="display:none;padding:18px 0;text-align:center">没有符合当前筛选条件的条目。</div>
+    </section>
+  </main>
+
+  <script src="latency.js"></script>
+  <script>
+  (() => {
+    'use strict';
+    // 只读页：本脚本只发起 GET 请求（复盘只读接口），不创建 WebSocket，也没有任何写接口调用。
+
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[c]));
+    }
+    function fmtClock(iso) {
+      const d = new Date(iso);
+      return d.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+    function fmtDuration(ms) {
+      if (ms == null || !Number.isFinite(ms)) return '—';
+      const sec = Math.round(ms / 100) / 10;
+      if (sec < 60) return `${sec} 秒`;
+      const m = Math.floor(sec / 60);
+      const s = Math.round(sec - m * 60);
+      return `${m} 分 ${s} 秒`;
+    }
+    function fmtSec(ms) {
+      return `${(Math.round(ms / 100) / 10).toFixed(1)}s`;
+    }
+    function fmtT(ms) {
+      const m = Math.floor(ms / 60000);
+      const s = Math.floor((ms % 60000) / 1000);
+      const tenth = Math.floor((ms % 1000) / 100);
+      return `${m}:${String(s).padStart(2, '0')}.${tenth}`;
+    }
+
+    const sessLoading = document.getElementById('sessLoading');
+    const pickerRow = document.getElementById('pickerRow');
+    const sessionSelect = document.getElementById('sessionSelect');
+    const openReplayLink = document.getElementById('openReplayLink');
+    const sessionMeta = document.getElementById('sessionMeta');
+    const resultCard = document.getElementById('resultCard');
+    const positionFilter = document.getElementById('positionFilter');
+    const resultFilter = document.getElementById('resultFilter');
+    const filterHint = document.getElementById('filterHint');
+    const summaryChips = document.getElementById('summaryChips');
+    const cueList = document.getElementById('cueList');
+    const emptyFilter = document.getElementById('emptyFilter');
+
+    const RESULT_CHIP = { confirmed: 'ok', late: 'late', timeout: 'timeout', unconfirmed: '' };
+    const END_STATE_CHIP = { completed: 'ok', recalled: 'timeout', interrupted: 'late' };
+
+    let sessions = [];
+    let diag = null; // 当前场次的诊断结果（CueLatency.diagnose 返回）
+    let sessionInfo = null; // 当前场次 session 摘要（fileId / runId 用于跳转链接）
+
+    function refValue(s) { return `${s.fileId}/${s.runId}`; }
+    function optionLabel(s) {
+      return `${fmtClock(s.startedAt)} → ${fmtClock(s.finishedAt)} ｜ ${s.cueCount} 条口令 ｜ ${fmtDuration(s.durationMs)} ｜ ${s.fileId.slice(0, 8)}… #${s.runId + 1}`;
+    }
+    function replayHref(t) {
+      const q = new URLSearchParams({ file: sessionInfo.fileId, run: String(sessionInfo.runId) });
+      if (Number.isFinite(t) && t > 0) q.set('t', Math.round(t));
+      return `replay.html?${q.toString()}`;
+    }
+
+    // ---------------------------------------------------------------------
+    // 场次列表与加载
+    // ---------------------------------------------------------------------
+    async function loadSessions(preselect) {
+      let payload;
+      try {
+        payload = await (await fetch('/api/replay/sessions')).json();
+      } catch {
+        sessLoading.innerHTML = '<span style="color:#ff9c9c">场次列表加载失败，请确认服务已启动</span>';
+        return;
+      }
+      sessions = payload.sessions || [];
+      if (!sessions.length) {
+        sessLoading.innerHTML = '<span style="color:#f0c169">data 目录中尚无已结束（session-start → sequence-finished 完整闭合）的场次。</span>';
+        return;
+      }
+      sessLoading.style.display = 'none';
+      pickerRow.style.display = '';
+      sessionSelect.innerHTML = sessions.map((s) =>
+        `<option value="${esc(refValue(s))}">${esc(optionLabel(s))}</option>`).join('');
+      if (preselect && sessions.some((s) => refValue(s) === preselect)) {
+        sessionSelect.value = preselect;
+      }
+      await loadSession(sessionSelect.value);
+    }
+
+    async function loadSession(ref) {
+      const s = sessions.find((x) => refValue(x) === ref);
+      if (!s) return;
+      sessionInfo = s;
+      openReplayLink.href = replayHref(null);
+      openReplayLink.style.display = '';
+      sessionMeta.style.display = '';
+      sessionMeta.innerHTML = `
+        <span>口令 <b>${s.cueCount}</b> 条</span>
+        <span>事件 <b>${s.eventCount}</b> 条</span>
+        <span>时长 <b>${esc(fmtDuration(s.durationMs))}</b></span>
+        <span>确认时限 <b>${s.timeoutSec}s</b></span>
+        <span title="${esc(s.fileId)}">日志 <b>${esc(s.fileId.slice(0, 8))}…</b> 第 ${s.runId + 1} 段</span>`;
+      let payload;
+      try {
+        const resp = await fetch(`/api/replay/sessions/${encodeURIComponent(s.fileId)}/${encodeURIComponent(s.runId)}`);
+        payload = await resp.json();
+        if (!resp.ok || payload.error) {
+          resultCard.style.display = 'none';
+          alert(`场次数据加载失败：${payload.error || resp.status}`);
+          return;
+        }
+      } catch {
+        resultCard.style.display = 'none';
+        alert('场次数据加载失败，请确认服务已启动');
+        return;
+      }
+      diag = CueLatency.diagnose(payload);
+      buildFilters();
+      renderResult();
+    }
+
+    // ---------------------------------------------------------------------
+    // 筛选
+    // ---------------------------------------------------------------------
+    function buildFilters() {
+      positionFilter.innerHTML = '<option value="all">全部岗位</option>' +
+        diag.positions.map((p) => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+      positionFilter.value = 'all';
+      resultFilter.innerHTML = '<option value="all">全部结果</option>' +
+        Object.entries(CueLatency.RESULT_LABELS).map(([k, v]) =>
+          `<option value="${k}">${v}</option>`).join('');
+      resultFilter.value = 'all';
+    }
+
+    function slotVisible(slot) {
+      const pv = positionFilter.value;
+      if (pv !== 'all' && !CueLatency.slotInvolvesPosition(slot, pv)) return false;
+      const rv = resultFilter.value;
+      if (rv !== 'all' && slot.result !== rv) return false;
+      return true;
+    }
+
+    // ---------------------------------------------------------------------
+    // 渲染
+    // ---------------------------------------------------------------------
+    function posLabel(slot) {
+      if (!slot.substituted) return esc(slot.target);
+      return `<span class="lat-subbed">${esc(slot.target)}</span>→<b>${esc(slot.effective)}</b>`;
+    }
+
+    function slotTitle(round, slot) {
+      const parts = [`#${round.seq} 第 ${round.revision} 版 · ${slot.target}`];
+      if (slot.substituted) parts.push(`已由 ${slot.effective} 接管（替岗后的确认计入接管岗位）`);
+      parts.push(`结果：${CueLatency.RESULT_LABELS[slot.result]}`);
+      parts.push(`有效等待 ${fmtSec(slot.waitMs)}（墙钟 ${fmtSec(slot.barEndT - round.startT)}，扣除暂停 ${fmtSec(slot.pauseDeductMs)}）`);
+      if (slot.timedOut) parts.push(`超时时刻 +${fmtT(slot.timeoutT - round.startT)}`);
+      parts.push('点击跳回复盘对应事件');
+      return parts.join('｜');
+    }
+
+    function renderSlot(round, slot, scaleMs) {
+      const pct = (t) => Math.max(0, Math.min(100, ((t - round.startT) / scaleMs) * 100));
+      const barW = Math.max(0, pct(slot.barEndT));
+      // 暂停区间带：该轮次暂停窗口（已从等待时长中扣除）
+      const pauses = round.pauses.map((p) =>
+        `<i class="lat-pause" style="left:${pct(p.startT)}%;width:${Math.max(0.4, pct(p.endT) - pct(p.startT))}%"></i>`).join('');
+      const timeoutMark = slot.timedOut
+        ? `<i class="lat-mark mk-timeout" style="left:${pct(slot.timeoutT)}%" title="超时未确认标记"></i>` : '';
+      const confirmMark = slot.confirm
+        ? `<i class="lat-mark mk-confirm ${slot.result}" style="left:${barW}%"></i>` : '';
+      const deduct = slot.pauseDeductMs > 0
+        ? `<span class="lat-deduct">扣暂停 ${fmtSec(slot.pauseDeductMs)}</span>` : '';
+      return `<a class="lat-row" href="${esc(replayHref(slot.jumpT))}" title="${esc(slotTitle(round, slot))}">
+        <span class="lat-pos">${posLabel(slot)}</span>
+        <span class="lat-track">${pauses}<i class="lat-bar ${slot.result}" style="width:${barW}%"></i>${timeoutMark}${confirmMark}</span>
+        <span class="lat-wait">${fmtSec(slot.waitMs)}${deduct}</span>
+        <span class="chip ${RESULT_CHIP[slot.result]}">${CueLatency.RESULT_LABELS[slot.result]}</span>
+      </a>`;
+    }
+
+    function renderRound(cue, round) {
+      const rows = round.slots.filter(slotVisible);
+      if (!rows.length) return '';
+      const scaleMs = Math.max(1, round.durationMs);
+      const stateChip = `<span class="chip ${END_STATE_CHIP[round.endState] || ''}">${CueLatency.END_STATE_LABELS[round.endState] || round.endState}</span>`;
+      const reason = round.reason
+        ? `<div class="lat-round-reason">撤回 / 修订原因：${esc(round.reason)}</div>` : '';
+      const pausesLine = round.pauses.length
+        ? `<div class="lat-round-pauses">${round.pauses.map((p) =>
+            `⏸ +${fmtT(p.startT - round.startT)} → +${fmtT(p.endT - round.startT)}（${fmtSec(p.endT - p.startT)}${p.reason ? `，${esc(p.reason)}` : ''}）`).join('；')}——已从等待时长扣除</div>` : '';
+      const extras = round.extras.length
+        ? `<div class="lat-round-extras">⚠️ ${round.extras.length} 条确认无法归属到目标岗位（日志异常），未计入瀑布。</div>` : '';
+      return `<div class="lat-round">
+        <div class="lat-round-head">
+          <span class="chip ${round.revision > 1 ? 'late' : ''}">第 ${round.revision} 版</span>
+          ${stateChip}
+          <span class="muted">开始 +${fmtT(round.startT)} ｜ 时长 ${fmtSec(round.durationMs)}${round.pauseMs > 0 ? ` ｜ 暂停 ${fmtSec(round.pauseMs)}` : ''}</span>
+          ${round.attemptId ? `<span class="lat-attempt" title="本轮次 attemptId（轮次凭证）">attempt ${esc(round.attemptId.slice(0, 8))}…</span>` : '<span class="lat-attempt muted">无 attemptId（旧日志）</span>'}
+          <a class="lat-jump" href="${esc(replayHref(round.startT))}" title="在复盘中查看本轮次开始时刻">↗ 轮次现场</a>
+        </div>
+        ${reason}${pausesLine}
+        <div class="lat-rows">${rows.map((slot) => renderSlot(round, slot, scaleMs)).join('')}</div>
+        <div class="lat-scale"><span>+0.0s</span><span>+${fmtSec(round.durationMs)}</span></div>
+        ${extras}
+      </div>`;
+    }
+
+    function renderCue(cue) {
+      const rounds = cue.rounds.map((r) => renderRound(cue, r)).join('');
+      if (!rounds) return '';
+      const revised = cue.rounds.length > 1;
+      const origLine = revised && cue.text && cue.text !== cue.finalText
+        ? `<div class="lat-cue-orig muted">原始口令：${esc(cue.text)}</div>` : '';
+      return `<section class="lat-cue">
+        <div class="lat-cue-head">
+          <span class="chip">#${cue.seq}</span>
+          <b class="lat-cue-text">${esc(cue.finalText || cue.text)}</b>
+          <span class="muted">→ ${cue.targets.map(esc).join('、')}</span>
+          ${revised ? `<span class="chip late">${cue.rounds.length} 个轮次（修订 ${cue.rounds.length - 1} 次）</span>` : ''}
+          <a class="lat-jump" href="${esc(replayHref(cue.rounds[0] ? cue.rounds[0].startT : null))}" title="在复盘中查看该口令发出时刻">↗ 复盘</a>
+        </div>
+        ${origLine}
+        ${rounds}
+      </section>`;
+    }
+
+    function renderResult() {
+      resultCard.style.display = '';
+      const sm = diag.summary;
+      summaryChips.innerHTML = `
+        <span class="chip">口令 ${sm.cues} 条</span>
+        <span class="chip">轮次 ${sm.rounds}</span>
+        <span class="chip ok">已确认 ${sm.confirmed}</span>
+        <span class="chip late">迟到确认 ${sm.late}</span>
+        <span class="chip timeout">超时未确认 ${sm.timeout}</span>
+        <span class="chip">未确认 ${sm.unconfirmed}</span>
+        <span class="chip">替岗 ${sm.substitutions}</span>
+        <span class="chip">暂停 ${sm.pauses} 次</span>`;
+      const html = diag.cues.map(renderCue).join('');
+      cueList.innerHTML = html;
+      emptyFilter.style.display = html ? 'none' : '';
+      const filtering = positionFilter.value !== 'all' || resultFilter.value !== 'all';
+      filterHint.textContent = filtering ? '（筛选已生效）' : '';
+    }
+
+    sessionSelect.addEventListener('change', () => loadSession(sessionSelect.value));
+    positionFilter.addEventListener('change', renderResult);
+    resultFilter.addEventListener('change', renderResult);
+
+    // 支持深链预选：latency.html?file=<fileId>&run=<runId>
+    const params = new URLSearchParams(location.search);
+    const preFile = params.get('file');
+    const preRun = params.get('run');
+    loadSessions(preFile != null && preRun != null ? `${preFile}/${preRun}` : null);
+  })();
+  </script>
+</body>
+</html>
